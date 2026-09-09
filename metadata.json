@@ -1,0 +1,6 @@
+{
+  "name": "Voice Sample Collector",
+  "description": "Collect high-quality voice samples ('sheild activate' with 1s window and 0.5s pause) with video reference guide, cadence trainer, and Google Drive sheild_dataset storage.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
