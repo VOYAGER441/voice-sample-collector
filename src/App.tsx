@@ -9,7 +9,6 @@ import {
   Sparkles,
   Database,
 } from 'lucide-react';
-import { User } from 'firebase/auth';
 import { RespondentForm, AudioRecording, SubmissionRecord, ToastMessage } from './types';
 import { RespondentFormComponent } from './components/RespondentForm';
 import { AudioRecorder } from './components/AudioRecorder';
@@ -17,10 +16,7 @@ import { ReferenceVideoGuide } from './components/ReferenceVideoGuide';
 import { SubmissionSuccess } from './components/SubmissionSuccess';
 import { ToastContainer } from './components/ToastContainer';
 import { SubmissionsListModal } from './components/SubmissionsListModal';
-import { GoogleSignInButton } from './components/GoogleSignInButton';
 import { formatTime } from './utils/audioHelpers';
-import { initAuth, signInWithGoogle, signOut } from './utils/auth';
-import { DEFAULT_DRIVE_FOLDER_NAME } from './utils/drive';
 
 export default function App() {
   const [form, setForm] = useState<RespondentForm>({ name: '', email: '' });
@@ -31,10 +27,34 @@ export default function App() {
   const [isSubmissionsModalOpen, setIsSubmissionsModalOpen] = useState(false);
   const [totalSubmissionsCount, setTotalSubmissionsCount] = useState<number>(0);
 
-  // Admin Google Auth state
-  const [user, setUser] = useState<User | null>(null);
-  const [accessToken, setAccessToken] = useState<string | null>(null);
-  const [isAuthLoading, setIsAuthLoading] = useState(false);
+  // Admin auth state
+  const [adminId, setAdminId] = useState<string | null>(null);
+  const [isAdminAuthLoading, setIsAdminAuthLoading] = useState(true);
+
+  // Check existing session on mount
+  useEffect(() => {
+    const token = localStorage.getItem('admin_token');
+    if (token) {
+      fetch('/api/auth/me', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+        .then((res) => {
+          if (res.ok) return res.json();
+          throw new Error('Session expired');
+        })
+        .then((data) => {
+          setAdminId(data.adminId);
+        })
+        .catch(() => {
+          localStorage.removeItem('admin_token');
+        })
+        .finally(() => {
+          setIsAdminAuthLoading(false);
+        });
+    } else {
+      setIsAdminAuthLoading(false);
+    }
+  }, []);
 
   // Fetch count of submissions for badge
   const refreshSubmissionCount = async () => {
@@ -49,16 +69,8 @@ export default function App() {
     }
   };
 
-  // Initialize Firebase Auth listener
   useEffect(() => {
-    const unsubscribe = initAuth((currentUser, token) => {
-      setUser(currentUser);
-      setAccessToken(token);
-    });
     refreshSubmissionCount();
-    return () => {
-      if (typeof unsubscribe === 'function') unsubscribe();
-    };
   }, []);
 
   // Toast Notification helper
@@ -76,35 +88,27 @@ export default function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   };
 
-  // Google Sign-In & Sign-Out handlers for Admin
-  const handleSignIn = async () => {
-    setIsAuthLoading(true);
-    try {
-      const result = await signInWithGoogle();
-      setUser(result.user);
-      setAccessToken(result.accessToken);
-      addToast(
-        'success',
-        'Google Drive Connected',
-        `Admin connected: ${result.user.displayName || result.user.email}. Samples will sync to "${DEFAULT_DRIVE_FOLDER_NAME}".`
-      );
-    } catch (err: any) {
-      console.error('Sign-in error:', err);
-      addToast('error', 'Google Sign-In Error', err.message || 'Failed to sign in with Google.');
-    } finally {
-      setIsAuthLoading(false);
-    }
+  // Admin login handler
+  const handleAdminLogin = (loggedInAdminId: string) => {
+    setAdminId(loggedInAdminId);
   };
 
-  const handleSignOut = async () => {
-    try {
-      await signOut();
-      setUser(null);
-      setAccessToken(null);
-      addToast('info', 'Signed Out', 'Admin disconnected from Google Drive.');
-    } catch (err: any) {
-      console.error('Sign-out error:', err);
+  // Admin logout handler
+  const handleAdminLogout = async () => {
+    const token = localStorage.getItem('admin_token');
+    if (token) {
+      try {
+        await fetch('/api/auth/logout', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      } catch {
+        // Ignore logout errors
+      }
     }
+    localStorage.removeItem('admin_token');
+    setAdminId(null);
+    addToast('info', 'Logged Out', 'Admin session ended.');
   };
 
   // Validation rules
@@ -112,7 +116,7 @@ export default function App() {
   const isDurationValid = Boolean(recording && recording.duration >= 5.0);
   const isReadyToSubmit = isNameValid && isDurationValid && !isSubmitting;
 
-  // Handle Form Submission (No respondent login required)
+  // Handle Form Submission
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -120,7 +124,7 @@ export default function App() {
       if (!isNameValid) {
         addToast('error', 'Name Required', 'Please provide your Full Name.');
       } else if (!recording) {
-        addToast('error', 'No Audio Recorded', 'Please record your 1-minute voice sample before submitting.');
+        addToast('error', 'No Audio Recorded', 'Please record your voice sample before submitting.');
       } else if (!isDurationValid) {
         addToast('error', 'Sample Too Short', 'Voice sample must be at least 5 seconds long.');
       }
@@ -136,20 +140,8 @@ export default function App() {
       formData.append('mimeType', recording.mimeType);
       formData.append('audio', recording.blob, recording.fileName);
 
-      const headers: Record<string, string> = {};
-      if (
-        accessToken &&
-        typeof accessToken === 'string' &&
-        accessToken.length > 10 &&
-        accessToken !== 'null' &&
-        accessToken !== 'undefined'
-      ) {
-        headers['Authorization'] = `Bearer ${accessToken}`;
-      }
-
       const response = await fetch('/api/upload', {
         method: 'POST',
-        headers,
         body: formData,
       });
 
@@ -182,18 +174,7 @@ export default function App() {
       const submissionRecord = data?.submission || (data?.id && data?.fileName ? data : null);
 
       if (!submissionRecord) {
-        console.error('Unexpected server response format:', {
-          status: response.status,
-          contentType: response.headers.get('content-type'),
-          body: responseText.slice(0, 300),
-        });
-        const customMsg =
-          data?.error ||
-          data?.message ||
-          (responseText && !responseText.startsWith('<') ? responseText.slice(0, 100) : null);
-        throw new Error(
-          customMsg || 'Upload completed, but the server returned an incomplete submission record.'
-        );
+        throw new Error(data?.error || data?.message || 'Upload completed, but the server returned an incomplete submission record.');
       }
 
       setSubmissionSuccess(submissionRecord);
@@ -249,14 +230,22 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2">
-            {/* Admin Google Drive Connection Pill (if admin is signed in) */}
-            {user && (
-              <GoogleSignInButton
-                user={user}
-                onSignIn={handleSignIn}
-                onSignOut={handleSignOut}
-                isLoading={isAuthLoading}
-              />
+            {/* Admin status pill */}
+            {adminId && (
+              <div className="flex items-center gap-2 bg-emerald-50/80 border border-emerald-200/80 rounded-xl px-2.5 py-1.5 text-xs text-emerald-900 shadow-2xs">
+                <div className="w-6 h-6 rounded-full bg-emerald-200 text-emerald-800 flex items-center justify-center font-bold text-xs shrink-0">
+                  A
+                </div>
+                <span className="font-semibold text-emerald-950 truncate max-w-[100px]">{adminId}</span>
+                <button
+                  type="button"
+                  onClick={handleAdminLogout}
+                  className="p-1 text-slate-400 hover:text-slate-600 hover:bg-emerald-100/60 rounded-md transition ml-1 cursor-pointer"
+                  title="Sign out"
+                >
+                  <span className="text-[10px] font-semibold">Logout</span>
+                </button>
+              </div>
             )}
 
             {/* Submissions Log / Admin Panel Button */}
@@ -373,7 +362,7 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Submit Button (Direct & Frictionless) */}
+                  {/* Submit Button */}
                   <div className="pt-2">
                     <button
                       type="submit"
@@ -423,7 +412,7 @@ export default function App() {
           <span>Voice Sample Survey • 1-Minute Audio Collector</span>
           <div className="flex items-center gap-1.5 text-slate-400">
             <Database className="w-3.5 h-3.5 text-blue-500" />
-            <span>Dataset: <strong>{DEFAULT_DRIVE_FOLDER_NAME}</strong></span>
+            <span>Dataset: <strong>sheild_dataset</strong></span>
           </div>
         </div>
       </footer>
@@ -435,11 +424,10 @@ export default function App() {
           setIsSubmissionsModalOpen(false);
           refreshSubmissionCount();
         }}
-        user={user}
-        accessToken={accessToken}
-        onSignIn={handleSignIn}
-        onSignOut={handleSignOut}
-        isAuthLoading={isAuthLoading}
+        adminId={adminId}
+        isAdminAuthLoading={isAdminAuthLoading}
+        onAdminLogin={handleAdminLogin}
+        onAdminLogout={handleAdminLogout}
         onShowToast={addToast}
       />
     </div>
