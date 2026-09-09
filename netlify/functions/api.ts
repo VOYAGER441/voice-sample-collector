@@ -7,10 +7,21 @@ const ADMIN_ID = process.env.ADMIN_ID || "admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "sheild2024";
 const SESSION_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
-// --- Blobs stores ---
-const submissionsStore = getStore({ name: "submissions" });
-const uploadsStore = getStore({ name: "uploads" });
-const sessionsStore = getStore({ name: "sessions" });
+// --- Blobs stores (with explicit config for Netlify deployment) ---
+const siteID = process.env.SITE_ID || process.env.NETLIFY_SITE_ID || "";
+const blobsToken = process.env.BLOBS_TOKEN || process.env.NETLIFY_AUTH_TOKEN || "";
+
+function createStore(name: string) {
+  if (siteID && blobsToken) {
+    return getStore({ name, siteID, token: blobsToken });
+  }
+  // Fallback: try automatic configuration
+  return getStore({ name });
+}
+
+const submissionsStore = createStore("submissions");
+const uploadsStore = createStore("uploads");
+const sessionsStore = createStore("sessions");
 
 // --- Helpers ---
 function generateToken(): string {
