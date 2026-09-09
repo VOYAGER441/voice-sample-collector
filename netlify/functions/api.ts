@@ -235,10 +235,9 @@ function splitMultipart(buffer: Buffer, boundary: string): Buffer[] {
   return parts;
 }
 
-async function handleServeFile(event: HandlerEvent) {
-  // Extract filename from path: /api/uploads/:filename
-  const pathParts = event.path.split("/");
-  const filename = pathParts[pathParts.length - 1];
+async function handleServeFile(apiPath: string) {
+  // apiPath is like /uploads/:filename
+  const filename = apiPath.split("/").pop();
   if (!filename) return jsonResp(404, { error: "File not found." });
 
   try {
@@ -272,13 +271,13 @@ async function handleListSubmissions() {
   return jsonResp(200, { submissions });
 }
 
-async function handleDownload(event: HandlerEvent) {
+async function handleDownload(event: HandlerEvent, apiPath: string) {
   const adminId = await requireAdminAuth(event);
   if (!adminId) return jsonResp(401, { error: "Admin authentication required." });
 
-  const pathParts = event.path.split("/");
-  // /api/submissions/:id/download
-  const id = pathParts[3];
+  // apiPath is like /submissions/:id/download
+  const match = apiPath.match(/^\/submissions\/([^/]+)\/download$/);
+  const id = match?.[1];
   if (!id) return jsonResp(400, { error: "Missing submission ID." });
 
   const submissions = await getSubmissions();
@@ -303,12 +302,13 @@ async function handleDownload(event: HandlerEvent) {
   }
 }
 
-async function handleDelete(event: HandlerEvent) {
+async function handleDelete(event: HandlerEvent, apiPath: string) {
   const adminId = await requireAdminAuth(event);
   if (!adminId) return jsonResp(401, { error: "Admin authentication required." });
 
-  const pathParts = event.path.split("/");
-  const id = pathParts[3];
+  // apiPath is like /submissions/:id
+  const match = apiPath.match(/^\/submissions\/([^/]+)$/);
+  const id = match?.[1];
   if (!id) return jsonResp(400, { error: "Missing submission ID." });
 
   const submissions = await getSubmissions();
@@ -333,9 +333,11 @@ export const handler: Handler = async (event: HandlerEvent, _context: HandlerCon
   }
 
   const method = event.httpMethod;
-  // event.path comes in as /.netlify/functions/api/...
-  // Strip the function prefix to get the /api/... path
-  const apiPath = event.path.replace(/^\/\.netlify\/functions\/api/, "") || "/";
+  // Handle both rewritten path (/.netlify/functions/api/...) and original (/api/...)
+  let apiPath = event.path;
+  apiPath = apiPath.replace(/^\/\.netlify\/functions\/api/, "");
+  apiPath = apiPath.replace(/^\/api/, "");
+  if (!apiPath.startsWith("/")) apiPath = "/" + apiPath;
 
   try {
     // Auth routes
@@ -347,18 +349,18 @@ export const handler: Handler = async (event: HandlerEvent, _context: HandlerCon
     if (method === "POST" && apiPath === "/upload") return handleUpload(event);
 
     // Serve uploaded files
-    if (method === "GET" && apiPath.startsWith("/uploads/")) return handleServeFile(event);
+    if (method === "GET" && apiPath.startsWith("/uploads/")) return handleServeFile(apiPath);
 
     // List submissions
     if (method === "GET" && apiPath === "/submissions") return handleListSubmissions();
 
     // Download (admin only): /submissions/:id/download
     if (method === "GET" && /^\/submissions\/[^/]+\/download$/.test(apiPath))
-      return handleDownload(event);
+      return handleDownload(event, apiPath);
 
     // Delete (admin only): /submissions/:id
     if (method === "DELETE" && /^\/submissions\/[^/]+$/.test(apiPath))
-      return handleDelete(event);
+      return handleDelete(event, apiPath);
 
     return jsonResp(404, { error: `Route not found: ${method} ${apiPath}` });
   } catch (err: any) {
